@@ -4,21 +4,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Skeleton } from '../components/ui/skeleton';
 import { Alert, AlertDescription } from '../components/ui/alert';
 
-function sortItems(items, sortKey, sortDir) {
-  const dir = sortDir === 'desc' ? -1 : 1;
-  return [...items].sort((a, b) => {
-    const av = a[sortKey];
-    const bv = b[sortKey];
-    if (av == null && bv == null) return 0;
-    if (av == null) return 1;
-    if (bv == null) return -1;
-    if (typeof av === 'string' && typeof bv === 'string') {
-      return av.localeCompare(bv) * dir;
-    }
-    return (av - bv) * dir;
-  });
-}
-
 export function TradingView() {
   const [items, setItems] = useState([]);
   const [incomingItems, setIncomingItems] = useState([]);
@@ -29,9 +14,21 @@ export function TradingView() {
   const [sortKey, setSortKey] = useState('netProfitPct');
   const [sortDir, setSortDir] = useState('desc');
 
+  // New configurable filters & persistence
+  const [minNetPct, setMinNetPct] = useState(() => Number(localStorage.getItem('tv_minNetPct') ?? 1));
+  const [maxNetPct, setMaxNetPct] = useState(() => Number(localStorage.getItem('tv_maxNetPct') ?? 50));
+  const [persistItems, setPersistItems] = useState(() => localStorage.getItem('tv_persistItems') === 'true');
+  const [persistedMap, setPersistedMap] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('tv_persistedOpps') || '{}'); } catch { return {}; }
+  });
+
+  useEffect(() => { localStorage.setItem('tv_minNetPct', String(minNetPct)); }, [minNetPct]);
+  useEffect(() => { localStorage.setItem('tv_maxNetPct', String(maxNetPct)); }, [maxNetPct]);
+  useEffect(() => { localStorage.setItem('tv_persistItems', String(persistItems)); }, [persistItems]);
+  useEffect(() => { localStorage.setItem('tv_persistedOpps', JSON.stringify(persistedMap)); }, [persistedMap]);
+
   useEffect(() => {
     let mounted = true;
-
     async function fetchOpps() {
       try {
         const res = await fetch('/api/opportunities');
@@ -68,17 +65,28 @@ export function TradingView() {
     };
   }, []);
 
-  useEffect(() => {
-    latestRef.current = incomingItems;
-  }, [incomingItems]);
+  useEffect(() => { latestRef.current = incomingItems; }, [incomingItems]);
 
   useEffect(() => {
     const id = setInterval(() => {
-      setItems(latestRef.current);
+      const latest = latestRef.current || [];
+      const mergedMap = { ...persistedMap };
+      for (const o of latest) {
+        const key = `${o.symbol}-${o.buyExchange}-${o.sellExchange}`;
+        const prev = mergedMap[key];
+        if (!prev || (o.netProfitPct ?? 0) > (prev.netProfitPct ?? 0)) {
+          mergedMap[key] = o;
+        } else if (!persistItems) {
+          mergedMap[key] = o;
+        }
+      }
+      const merged = Object.values(mergedMap);
+      setPersistedMap(mergedMap);
+      setItems(persistItems ? merged : latest);
       setLoading(false);
     }, refreshMs);
     return () => clearInterval(id);
-  }, [refreshMs]);
+  }, [refreshMs, persistItems, persistedMap]);
 
   const filtered = useMemo(() => {
     return (items || []).filter((item) => {
@@ -91,15 +99,25 @@ export function TradingView() {
       const slipPct = buyEff ? (slipAbs / buyEff) * 100 : 0;
       const buyLiq = item?.buyLiquidity ?? item?.liquidity ?? 0;
       const sellLiq = item?.sellLiquidity ?? item?.liquidity ?? 0;
-      return net >= 1 && net <= 10 && spread <= 20 && vol > 0 && buyLiq >= qty * 2 && sellLiq >= qty * 2 && slipPct <= 0.2;
+      return net >= minNetPct && net <= maxNetPct && spread <= 20 && vol > 0 && buyLiq >= qty * 2 && sellLiq >= qty * 2 && slipPct <= 0.2;
     });
-  }, [items]);
+  }, [items, minNetPct, maxNetPct]);
 
-  const sorted = useMemo(() => sortItems(filtered, sortKey, sortDir), [filtered, sortKey, sortDir]);
+  const sorted = useMemo(() => {
+    const key = sortKey;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      const va = a?.[key] ?? 0;
+      const vb = b?.[key] ?? 0;
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  }, [filtered, sortKey, sortDir]);
 
   function toggleSort(key) {
     if (sortKey === key) {
-      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     } else {
       setSortKey(key);
       setSortDir('desc');
@@ -109,16 +127,19 @@ export function TradingView() {
   if (loading) {
     return (
       <div className="space-y-6 animate-fade-in">
-        {[...Array(3)].map((_, i) => (
-          <Card key={i} className="bg-card border-border">
-            <CardHeader>
-              <Skeleton className="h-6 w-32 bg-muted" />
-            </CardHeader>
-            <CardContent>
-              <Skeleton className="h-40 w-full bg-muted" />
-            </CardContent>
-          </Card>
-        ))}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {[...Array(6)].map((_, i) => (
+            <Card key={i} className="bg-card border-border">
+              <CardHeader>
+                <Skeleton className="h-4 w-24 bg-muted" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-8 w-32 bg-muted mb-2" />
+                <Skeleton className="h-4 w-48 bg-muted" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
@@ -134,9 +155,9 @@ export function TradingView() {
   }
 
   return (
-    <div className="rounded-lg border border-border bg-card p-4 animate-fade-in">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-xl font-semibold text-foreground">Arbitrage Opportunities</h3>
+    <div className="space-y-4 animate-fade-in">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-foreground">Trading View</h2>
         <div className="flex items-center gap-4">
           <label className="text-sm text-muted-foreground flex items-center gap-2">
             Refresh:
@@ -152,32 +173,64 @@ export function TradingView() {
               <option value={300000}>5 min</option>
             </select>
           </label>
+          <label className="text-sm text-muted-foreground flex items-center gap-2">
+            Min Net %:
+            <input
+              type="number"
+              className="bg-background border border-border rounded px-2 py-1 w-20 text-foreground"
+              value={minNetPct}
+              onChange={(e) => setMinNetPct(Number(e.target.value))}
+              min={0}
+              step={0.1}
+            />
+          </label>
+          <label className="text-sm text-muted-foreground flex items-center gap-2">
+            Max Net %:
+            <input
+              type="number"
+              className="bg-background border border-border rounded px-2 py-1 w-20 text-foreground"
+              value={maxNetPct}
+              onChange={(e) => setMaxNetPct(Number(e.target.value))}
+              min={1}
+              step={0.1}
+            />
+          </label>
+          <label className="text-sm text-muted-foreground flex items-center gap-2">
+            Persist items
+            <input
+              type="checkbox"
+              checked={persistItems}
+              onChange={(e) => setPersistItems(e.target.checked)}
+            />
+          </label>
           <div className="text-sm text-muted-foreground">{sorted.length} items</div>
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="text-left text-muted-foreground">
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('symbol')}>Asset Pair</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyExchange')}>Buy Exchange</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyPrice')}>Buy Price</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellExchange')}>Sell Exchange</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellPrice')}>Sell Price</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('spreadPct')}>Spread %</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('netProfitPct')}>Net Profit %</th>
-              <th className="px-3 py-2">Volume 24h</th>
-              <th className="px-3 py-2">Liquidity (buy/sell)</th>
-              <th className="px-3 py-2">Fees (trade/network)</th>
-              <th className="px-3 py-2">Slippage est.</th>
-              <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('ts')}>Timestamp</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((item, idx) => {
-              return (
-                <tr key={idx}>
+      {sorted.length === 0 ? (
+        <div className="text-center py-12">
+          <p className="text-muted-foreground">No tradable opportunities yet. Adjust net % thresholds or enable persistence.</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left text-muted-foreground">
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('symbol')}>Asset Pair</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyExchange')}>Buy Exchange</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyPrice')}>Buy Price</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellExchange')}>Sell Exchange</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellPrice')}>Sell Price</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('spreadPct')}>Spread %</th>
+                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('netProfitPct')}>Net Profit %</th>
+                <th className="px-3 py-2">Volume 24h</th>
+                <th className="px-3 py-2">Liquidity (buy/sell)</th>
+                <th className="px-3 py-2">Fees (trade/network)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((item, idx) => (
+                <tr key={idx} className="border-t border-border hover:bg-accent/50">
                   <td className="px-3 py-2 text-foreground">{item.symbol}</td>
                   <td className="px-3 py-2 text-foreground">{item.buyExchange}</td>
                   <td className="px-3 py-2 text-foreground">{item.buyPrice?.toFixed(6)}</td>
@@ -185,17 +238,15 @@ export function TradingView() {
                   <td className="px-3 py-2 text-foreground">{item.sellPrice?.toFixed(6)}</td>
                   <td className="px-3 py-2 text-foreground">{item.spreadPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-foreground">{item.netProfitPct?.toFixed(2)}%</td>
-                  <td className="px-3 py-2 text-foreground">{(item.volume24h ?? 0).toLocaleString()}</td>
-                  <td className="px-3 py-2 text-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toFixed(4)} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toFixed(4)}</td>
-                  <td className="px-3 py-2 text-foreground">{item.fees?.tradingAbs?.toFixed(6)} / {item.fees?.networkAbs?.toFixed(6)}</td>
-                  <td className="px-3 py-2 text-foreground">{(((item.slippage?.buyAbs ?? 0) + (item.slippage?.sellAbs ?? 0)) / (item.buyEffective ?? item.buyPrice ?? 1) * 100).toFixed(3)}%</td>
-                  <td className="px-3 py-2 text-muted-foreground">{new Date(item.ts).toLocaleTimeString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.volume24h ?? 0).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toFixed(4)} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toFixed(4)}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{item.fees?.tradingAbs?.toFixed(6)} / {item.fees?.networkAbs?.toFixed(6)}</td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
