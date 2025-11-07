@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Skeleton } from '../components/ui/skeleton';
-import { Alert, AlertDescription } from '../components/ui/alert';
+import { Skeleton } from './ui/skeleton';
+import { Alert, AlertDescription } from './ui/alert';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { apiUrl } from '../lib/api';
 
 export default function TradingView() {
   const [opportunities, setOpportunities] = useState([]);
@@ -13,39 +15,48 @@ export default function TradingView() {
 
   useEffect(() => {
     let mounted = true;
-    async function fetchOpps() {
+    async function load() {
       try {
-        const res = await fetch('/api/opportunities');
+        const res = await fetch(apiUrl('/api/opportunities'));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (mounted && Array.isArray(data.items)) {
-          setOpportunities(data.items);
-          setLastUpdated(new Date());
-          setLoading(false);
-        }
+        if (!mounted) return;
+        const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+        setOpportunities(items);
+        setLastUpdated(new Date());
+        setLoading(false);
+        setError(null);
       } catch (e) {
-        console.error('Failed to fetch opportunities', e);
+        console.error('Failed to load opportunities', e);
+        if (!mounted) return;
         setError('Failed to load opportunities');
         setLoading(false);
       }
     }
+    load();
+    const int = setInterval(load, 10000);
+    return () => { mounted = false; clearInterval(int); };
+  }, []);
 
-    fetchOpps();
+  // Subscribe to WebSocket updates from backend (supports split deployment)
+  useEffect(() => {
+    const wsUrl = import.meta.env.VITE_WS_BASE_URL || import.meta.env.VITE_API_BASE_URL || undefined;
+    const socket = wsUrl ? io(wsUrl, { transports: ['websocket'] }) : io();
 
-    const socket = io();
-    socket.on('opportunityUpdate', (opps) => {
+    const handleUpdate = (opps) => {
       const arr = Array.isArray(opps) ? opps : [];
       setOpportunities(arr);
       setLastUpdated(new Date());
       setError(null);
-    });
+    };
 
+    socket.on('opportunityUpdate', handleUpdate);
     socket.on('connect', () => setError(null));
     socket.on('error', () => setError('Connection error'));
     socket.on('disconnect', () => setError('Connection lost'));
 
     return () => {
-      mounted = false;
+      socket.off('opportunityUpdate', handleUpdate);
       socket.disconnect();
     };
   }, []);
@@ -57,26 +68,13 @@ export default function TradingView() {
   // Helper to determine reasons an item is hidden
   function getHiddenReasons(item, threshold) {
     const reasons = [];
-    if (!item) return ['No item'];
     const net = Number(item?.netProfitPct ?? 0);
     if (Number.isFinite(net) && net < threshold) {
       reasons.push(`Net profit ${net.toFixed(2)}% below threshold ${threshold}%`);
     }
-    if (item?.available === false) {
-      const dep = item?.buyTransfer?.depositEnabled;
-      const wdr = item?.sellTransfer?.withdrawEnabled;
-      if (dep === false) reasons.push('Deposit disabled on buy exchange');
-      if (wdr === false) reasons.push('Withdrawal disabled on sell exchange');
-      reasons.push('Transferability unavailable');
-    }
-    if (item?.isTradable === false) reasons.push('Not tradable on spot');
-    if (item?.marketActive === false) reasons.push('Market inactive or under maintenance');
+    // Removed volume/liquidity/depth gating to show all opportunities that meet net profit threshold
+    // Keep minimal sanity check for missing prices
     if (!item?.buyPrice || !item?.sellPrice) reasons.push('Missing price data');
-    const buyLiq = Number(item?.buyLiquidity ?? 0);
-    const sellLiq = Number(item?.sellLiquidity ?? 0);
-    if (buyLiq < 1_000_000 || sellLiq < 1_000_000) reasons.push('Insufficient liquidity (< $1M)');
-    const vol = Number(item?.volume24h ?? 0);
-    if (vol < 1_000_000) reasons.push('Low 24h volume (< $1M)');
     return reasons;
   }
 
@@ -170,9 +168,11 @@ export default function TradingView() {
                 <th className="px-3 py-2">Sell Price</th>
                 <th className="px-3 py-2">Spread %</th>
                 <th className="px-3 py-2">Net Profit %</th>
-                <th className="px-3 py-2">Volume 24h</th>
-                <th className="px-3 py-2">Liquidity (buy/sell)</th>
+                <th className="px-3 py-2">Volume 24h (USD)</th>
+                <th className="px-3 py-2">Market Depth (buy/sell, USD)</th>
+                <th className="px-3 py-2">Liquidity (buy/sell, units)</th>
                 <th className="px-3 py-2">Fees (trade/network)</th>
+                <th className="px-3 py-2">Taker Fees</th>
               </tr>
             </thead>
             <tbody>
@@ -185,45 +185,17 @@ export default function TradingView() {
                   <td className="px-3 py-2 text-foreground">{item.sellPrice?.toFixed(6)}</td>
                   <td className="px-3 py-2 text-foreground">{item.spreadPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-foreground">{item.netProfitPct?.toFixed(2)}%</td>
-                  <td className="px-3 py-2 text-muted-foreground">{(item.volume24h ?? 0).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.volume24hUSD ?? item.volume24h ?? 0).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.buyDepthUSDT ?? item.buyLiquidity ?? item.liquidity ?? 0)?.toLocaleString()} / {(item.sellDepthUSDT ?? item.sellLiquidity ?? item.liquidity ?? 0)?.toLocaleString()}</td>
                   <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toLocaleString()} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toLocaleString()}</td>
                   <td className="px-3 py-2 text-muted-foreground">{item.fees?.tradingAbs?.toFixed(6) ?? '-'} / {item.fees?.networkAbs?.toFixed(6) ?? '-'}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{item.fees?.takerBuyPct?.toFixed(3)}% / {item.fees?.takerSellPct?.toFixed(3)}%</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-
-      {/* Hidden reasons inspector */}
-      <details className="mt-4">
-        <summary className="cursor-pointer font-medium text-foreground">
-          Filtered out opportunities: {hidden.length}
-        </summary>
-        <div className="mt-2">
-          {hidden.length === 0 ? (
-            <div className="text-green-600">None hidden. All visible meet your criteria.</div>
-          ) : (
-            <ul className="list-disc pl-5">
-              {hidden.map(({ item, reasons }, idx) => (
-                <li key={idx} className="mb-2">
-                  <div className="font-semibold">
-                    {item?.symbol} | {item?.buyExchange} → {item?.sellExchange}
-                  </div>
-                  <div className="text-muted-foreground">
-                    {reasons.map((r, i) => (
-                      <span key={i}>
-                        {r}
-                        {i < reasons.length - 1 ? '; ' : ''}
-                      </span>
-                    ))}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </details>
     </div>
   );
 }

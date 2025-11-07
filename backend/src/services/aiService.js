@@ -20,17 +20,9 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
   // Trim context to stay well under token limits
   const maxOpps = Number(process.env.AI_MAX_OPPS ?? 20);
   const maxSymbols = Number(process.env.AI_MAX_SYMBOLS ?? 30);
-  const minVol = Number(process.env.AI_MIN_VOLUME ?? 1_000_000);
-  const minLiq = Number(process.env.AI_MIN_LIQUIDITY ?? 1_000_000);
 
   function slimOpportunities(items = []) {
-    const eligible = items.filter((o) => {
-      const vol = o?.volume24h ?? 0;
-      const buyLiq = o?.buyLiquidity ?? o?.liquidity ?? 0;
-      const sellLiq = o?.sellLiquidity ?? o?.liquidity ?? 0;
-      return vol >= minVol && buyLiq >= minLiq && sellLiq >= minLiq;
-    });
-    const sorted = [...eligible].sort((a, b) => (b?.netProfitPct ?? 0) - (a?.netProfitPct ?? 0));
+    const sorted = [...items].sort((a, b) => (b?.netProfitPct ?? 0) - (a?.netProfitPct ?? 0));
     return sorted.slice(0, maxOpps).map((o) => ({
       symbol: o.symbol,
       buyExchange: o.buyExchange,
@@ -83,7 +75,7 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
     return trimmed;
   }
 
-  const systemPrompt = `You are Crypto Arbitrage AI Trader. Recommend only opportunities with >= $${minVol.toLocaleString()} 24h volume and >= $${minLiq.toLocaleString()} liquidity on both legs. Use provided trimmed market context to answer precisely with actionable arbitrage recommendations.`;
+  const systemPrompt = `You are Crypto Arbitrage AI Trader. Analyze the provided market context and list the best arbitrage opportunities based solely on net profit, fees, and slippage considerations. Do not enforce additional volume/liquidity constraints. Provide accurate, actionable recommendations.`;
 
   const context = {
     timestamp: Date.now(),
@@ -91,7 +83,7 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
       opportunityCount: Array.isArray(opps?.items) ? opps.items.length : 0,
       snapshotSymbolCount: Object.keys(snapshot?.data || {}).length,
       snapshotTs: snapshot?.timestamp,
-      constraints: { minVolumeUSD: minVol, minLiquidityUSD: minLiq },
+
     },
     opportunities: slimOpportunities(Array.isArray(opps?.items) ? opps.items : []),
     snapshot: slimSnapshot(snapshot),

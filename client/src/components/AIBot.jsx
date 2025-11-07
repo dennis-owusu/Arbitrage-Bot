@@ -6,15 +6,13 @@ import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Alert, AlertDescription } from './ui/alert';
 import { Skeleton } from './ui/skeleton';
+import { apiUrl } from '../lib/api';
 
 export function AIBot() {
   const [query, setQuery] = useState('Analyze current arbitrage opportunities and suggest the best execution plan.');
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
-  const MIN_VOL_USD = 1_000_000;
-  const MIN_LIQ_USD = 1_000_000;
 
   async function sendMessage(e) {
     e?.preventDefault();
@@ -24,7 +22,7 @@ export function AIBot() {
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
     try {
-      const res = await fetch('/api/ai/chat', {
+      const res = await fetch(apiUrl('/api/ai/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: query }),
@@ -54,23 +52,16 @@ export function AIBot() {
     }
     const { opportunities = [], strategy, risks, raw } = content;
 
-    // Enforce display-only constraints for legitimacy
-    const filtered = Array.isArray(opportunities)
-      ? opportunities.filter((o) => {
-          const vol = o?.volume24h ?? 0;
-          const buyLiq = o?.buyLiquidity ?? o?.liquidity ?? 0;
-          const sellLiq = o?.sellLiquidity ?? o?.liquidity ?? 0;
-          return vol >= MIN_VOL_USD && buyLiq >= MIN_LIQ_USD && sellLiq >= MIN_LIQ_USD;
-        })
-      : [];
+    // Show AI-provided opportunities directly (already trimmed by backend)
+    const shown = Array.isArray(opportunities) ? opportunities : [];
 
     return (
       <div className="space-y-6">
-        {filtered.length > 0 ? (
+        {shown.length > 0 ? (
           <div>
             <div className="flex items-center justify-between mb-2">
               <h4 className="text-base font-semibold text-foreground">AI-Recommended Opportunities</h4>
-              <div className="text-xs text-muted-foreground">Min Volume: ${MIN_VOL_USD.toLocaleString()} • Min Liquidity: ${MIN_LIQ_USD.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground">Based on net profit, fees, slippage</div>
             </div>
             <div className="overflow-x-auto rounded border border-border">
               <table className="min-w-full text-sm">
@@ -83,14 +74,14 @@ export function AIBot() {
                     <th className="px-3 py-2">Sell Price</th>
                     <th className="px-3 py-2">Spread %</th>
                     <th className="px-3 py-2">Net %</th>
-                    <th className="px-3 py-2">Volume 24h</th>
-                    <th className="px-3 py-2">Liquidity (buy/sell)</th>
+                    <th className="px-3 py-2">Volume 24h (USD)</th>
+                    <th className="px-3 py-2">Market Depth (buy/sell, USD)</th>
                     <th className="px-3 py-2">Fees (trade/network)</th>
                     <th className="px-3 py-2">Slippage (buy/sell)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.slice(0, 20).map((o, i) => (
+                  {shown.slice(0, 20).map((o, i) => (
                     <tr key={i} className="border-t border-border hover:bg-accent/50">
                       <td className="px-3 py-2 text-foreground">{o.symbol}</td>
                       <td className="px-3 py-2 text-foreground">{o.buyExchange}</td>
@@ -99,8 +90,8 @@ export function AIBot() {
                       <td className="px-3 py-2 text-foreground">{typeof o.sellPrice === 'number' ? o.sellPrice.toFixed(6) : '-'}</td>
                       <td className="px-3 py-2 text-foreground">{typeof o.spreadPct === 'number' ? `${o.spreadPct.toFixed(2)}%` : '-'}</td>
                       <td className="px-3 py-2 text-foreground">{typeof o.netProfitPct === 'number' ? `${o.netProfitPct.toFixed(2)}%` : '-'}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{(o.volume24h ?? 0).toLocaleString()}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{(o.buyLiquidity ?? o.liquidity ?? 0)?.toLocaleString()} / {(o.sellLiquidity ?? o.liquidity ?? 0)?.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{(o.volume24hUSD ?? o.volume24h ?? 0).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{(o.buyDepthUSDT ?? o.buyLiquidity ?? o.liquidity ?? 0)?.toLocaleString()} / {(o.sellDepthUSDT ?? o.sellLiquidity ?? o.liquidity ?? 0)?.toLocaleString()}</td>
                       <td className="px-3 py-2 text-muted-foreground">{o.fees?.tradingAbs != null ? o.fees.tradingAbs.toFixed(6) : '-'} / {o.fees?.networkAbs != null ? o.fees.networkAbs.toFixed(6) : '-'}</td>
                       <td className="px-3 py-2 text-muted-foreground">{o.slippage?.buyAbs != null ? o.slippage.buyAbs.toFixed(6) : '-'} / {o.slippage?.sellAbs != null ? o.slippage.sellAbs.toFixed(6) : '-'}</td>
                     </tr>
@@ -110,7 +101,7 @@ export function AIBot() {
             </div>
           </div>
         ) : (
-          <div className="text-sm text-muted-foreground">No AI opportunities meet the volume/liquidity constraints yet.</div>
+          <div className="text-sm text-muted-foreground">No AI opportunities available right now.</div>
         )}
 
         {strategy && (

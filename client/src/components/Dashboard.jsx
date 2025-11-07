@@ -1,24 +1,25 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
-import { Skeleton } from '../components/ui/skeleton';
-import { Alert, AlertDescription } from '../components/ui/alert';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { Skeleton } from './ui/skeleton';
+import { Alert, AlertDescription } from './ui/alert';
+import { apiUrl } from '../lib/api';
 
-export function Dashboard() {
+export function Dashboard() { 
   const [opportunities, setOpportunities] = useState([]);
   const [incomingOpps, setIncomingOpps] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
   const latestRef = useRef([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
+ 
   // Remove frontend filters & persistence. Backend now owns min/max net and TTL.
 
   useEffect(() => {
     let mounted = true;
     async function fetchOpps() {
       try {
-        const res = await fetch('/api/opportunities');
+        const res = await fetch(apiUrl('/api/opportunities'));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (mounted && Array.isArray(data.items)) {
@@ -119,8 +120,9 @@ export function Dashboard() {
                 <th className="px-3 py-2">Sell Price</th>
                 <th className="px-3 py-2">Spread %</th>
                 <th className="px-3 py-2">Net Profit %</th>
-                <th className="px-3 py-2">Volume 24h</th>
-                <th className="px-3 py-2">Liquidity (buy/sell)</th>
+                <th className="px-3 py-2">Volume 24h (USD)</th>
+                <th className="px-3 py-2">Market Depth (buy/sell, USD)</th>
+                <th className="px-3 py-2">Liquidity (buy/sell, units)</th>
                 <th className="px-3 py-2">Fees (trade/network)</th>
               </tr>
             </thead>
@@ -134,9 +136,11 @@ export function Dashboard() {
                   <td className="px-3 py-2 text-foreground">{item.sellPrice?.toFixed(6)}</td>
                   <td className="px-3 py-2 text-foreground">{item.spreadPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-foreground">{item.netProfitPct?.toFixed(2)}%</td>
-                  <td className="px-3 py-2 text-muted-foreground">{(item.volume24h ?? 0).toLocaleString()}</td>
-                  <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toFixed(4)} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toFixed(4)}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.volume24hUSD ?? item.volume24h ?? 0).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.buyDepthUSDT ?? item.buyLiquidity ?? item.liquidity ?? 0)?.toLocaleString()} / {(item.sellDepthUSDT ?? item.sellLiquidity ?? item.liquidity ?? 0)?.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toLocaleString()} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toLocaleString()}</td>
                   <td className="px-3 py-2 text-muted-foreground">{item.fees?.tradingAbs?.toFixed(6)} / {item.fees?.networkAbs?.toFixed(6)}</td>
+                  <div className="text-xs text-muted-foreground">Taker fees: buy {item.fees?.takerBuyPct?.toFixed(3)}% • sell {item.fees?.takerSellPct?.toFixed(3)}%</div>
                 </tr>
               ))}
             </tbody>

@@ -18,13 +18,13 @@ dotenv.config();
 connectDB();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // Security middleware
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
-const limiter = rateLimit({
+const limiter = rateLimit({ 
   windowMs: 60 * 1000,
   max: 60, // 60 req/min per IP
 });

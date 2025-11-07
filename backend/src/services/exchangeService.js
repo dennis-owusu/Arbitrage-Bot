@@ -188,15 +188,29 @@ async function fetchTradingPairData(exchangeName, symbol) {
     bid: ticker.bid,
     ask: ticker.ask,
     spread: ticker.ask - ticker.bid,
-    volume: ticker.baseVolume,
+    volumeBase: ticker.baseVolume,
+    volumeQuote: ticker.quoteVolume,
+    volumeUSD: (ticker?.quoteVolume != null ? ticker.quoteVolume : ((ticker?.last || 0) * (ticker?.baseVolume || 0))),
     changePercent: ticker.percentage,
   };
+
+  // Compute notional market depth from top levels
+  const bidNotionalDepth = topBids.reduce((sum, l) => sum + ((l.price || 0) * (l.amount || 0)), 0);
+  const askNotionalDepth = topAsks.reduce((sum, l) => sum + ((l.price || 0) * (l.amount || 0)), 0);
+  const bidTop5Notional = topBids.slice(0, 5).reduce((sum, l) => sum + ((l.price || 0) * (l.amount || 0)), 0);
+  const askTop5Notional = topAsks.slice(0, 5).reduce((sum, l) => sum + ((l.price || 0) * (l.amount || 0)), 0);
 
   const orderbook = {
     bestBid: orderBook.bids[0]?.[0] || null,
     bestAsk: orderBook.asks[0]?.[0] || null,
     bids: topBids,
     asks: topAsks,
+    depth: {
+      bidNotional: bidNotionalDepth,
+      askNotional: askNotionalDepth,
+      bidTop5Notional,
+      askTop5Notional,
+    },
   };
 
   const fees = {
@@ -407,16 +421,30 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
           }
         };
 
-        const opportunity = {
+        // USD volume and market depth
+        const volume24hUSD = Math.min(buyData.price?.volumeUSD || 0, sellData.price?.volumeUSD || 0);
+        const buyDepthUSDT = buyData.orderbook?.depth?.askNotional ?? 0;
+        const sellDepthUSDT = sellData.orderbook?.depth?.bidNotional ?? 0;
+        const availableDepthUSDT = Math.min(buyDepthUSDT, sellDepthUSDT);
+
+        // Liquidity scores (0..1): per-leg coverage vs intended qty
+          const buyLiquidityScore = Number(Math.min(1, (buyLiquidity / Math.max(qtyEff, 1))).toFixed(3));
+          const sellLiquidityScore = Number(Math.min(1, (sellLiquidity / Math.max(qtyEff, 1))).toFixed(3));
+          const liquidityScore = Number(Math.min(buyLiquidityScore, sellLiquidityScore).toFixed(3));
+
+          const opportunity = {
           symbol,
           buyExchange: buyEx,
           sellExchange: sellEx,
           buyPrice: buyAsk,
-          sellPrice: sellBid,
+          sellPrice: sellBid, 
           buyEffective,
           sellEffective,
           quantity: qtyEff,
+          // Base-volume (units)
           volume24h: Math.min(buyData.price?.volume || 0, sellData.price?.volume || 0),
+          // USD notional volume
+          volume24hUSD,
           spreadAbs,
           spreadPct,
           fees: {
@@ -424,6 +452,8 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
             networkAbs: networkFeesAbs,
             takerBuy,
             takerSell,
+            takerBuyPct: (takerBuy ?? 0) * 100,
+            takerSellPct: (takerSell ?? 0) * 100,
           },
           slippage: {
             buyAbs: buyFill.slippageAbs,
@@ -434,14 +464,20 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
           liquidity: availableLiquidity,
           buyLiquidity,
           sellLiquidity,
+          liquidityScore,
+          buyLiquidityScore,
+          sellLiquidityScore,
+          // Depth (USD)
+          depthUSDT: availableDepthUSDT,
+          buyDepthUSDT,
+          sellDepthUSDT,
           limits,
           estimates: {
             confidenceScore: (() => {
               const slip = (buyFill.slippageAbs || 0) + (sellFill.slippageAbs || 0);
               const slipScore = Math.max(0, 1 - Math.min(slip / buyEffective, 0.02));
-              const liqScore = Math.min(1, availableLiquidity / (qtyEff * 10));
               const feeScore = Math.max(0, 1 - Math.min(tradingFeesAbs / grossProfitAbs, 0.9));
-              return Number((0.5 * slipScore + 0.3 * liqScore + 0.2 * feeScore).toFixed(3));
+              return Number((0.55 * slipScore + 0.25 * liquidityScore + 0.20 * feeScore).toFixed(3));
             })(),
           },
           risk: {
@@ -561,11 +597,11 @@ async function startMultiSymbolPolling(interval = Number(process.env.SCAN_INTERV
     const opps = computeOpportunitiesFromAllData(allData, tradeSizeUSDT);
 
     // Backend filter: only keep opportunities within configured net profit range
-    const minNet = Number(process.env.MIN_NET_PCT ?? 3);
+    const minNet = Number(process.env.MIN_NET_PCT ?? 1.5);
     const maxNet = Number(process.env.MAX_NET_PCT ?? 10);
     const filteredOpps = (opps || []).filter(o => {
-      const net = o?.netProfitPct ?? 0;
-      return net >= minNet && net <= maxNet;
+      const net = Number(o?.netProfitPct ?? 0);
+      return Number.isFinite(net) && net >= minNet;
     });
 
     const now = Date.now();
