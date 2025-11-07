@@ -1,31 +1,15 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Skeleton } from '../components/ui/skeleton';
 import { Alert, AlertDescription } from '../components/ui/alert';
 
-export function TradingView() {
-  const [items, setItems] = useState([]);
-  const [incomingItems, setIncomingItems] = useState([]);
-  const [refreshMs, setRefreshMs] = useState(30000);
-  const latestRef = useRef([]);
+export default function TradingView() {
+  const [opportunities, setOpportunities] = useState([]);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [sortKey, setSortKey] = useState('netProfitPct');
-  const [sortDir, setSortDir] = useState('desc');
-
-  // New configurable filters & persistence
-  const [minNetPct, setMinNetPct] = useState(() => Number(localStorage.getItem('tv_minNetPct') ?? 1));
-  const [maxNetPct, setMaxNetPct] = useState(() => Number(localStorage.getItem('tv_maxNetPct') ?? 50));
-  const [persistItems, setPersistItems] = useState(() => localStorage.getItem('tv_persistItems') === 'true');
-  const [persistedMap, setPersistedMap] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('tv_persistedOpps') || '{}'); } catch { return {}; }
-  });
-
-  useEffect(() => { localStorage.setItem('tv_minNetPct', String(minNetPct)); }, [minNetPct]);
-  useEffect(() => { localStorage.setItem('tv_maxNetPct', String(maxNetPct)); }, [maxNetPct]);
-  useEffect(() => { localStorage.setItem('tv_persistItems', String(persistItems)); }, [persistItems]);
-  useEffect(() => { localStorage.setItem('tv_persistedOpps', JSON.stringify(persistedMap)); }, [persistedMap]);
+  const [netProfitThreshold, setNetProfitThreshold] = useState(1.5);
+  const latestRef = useRef([]);
 
   useEffect(() => {
     let mounted = true;
@@ -35,8 +19,8 @@ export function TradingView() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (mounted && Array.isArray(data.items)) {
-          setItems(data.items);
-          setIncomingItems(data.items);
+          setOpportunities(data.items);
+          setLastUpdated(new Date());
           setLoading(false);
         }
       } catch (e) {
@@ -50,9 +34,10 @@ export function TradingView() {
 
     const socket = io();
     socket.on('opportunityUpdate', (opps) => {
-      setIncomingItems(Array.isArray(opps) ? opps : []);
+      const arr = Array.isArray(opps) ? opps : [];
+      setOpportunities(arr);
+      setLastUpdated(new Date());
       setError(null);
-      // avoid rapid UI refresh; we'll update on an interval
     });
 
     socket.on('connect', () => setError(null));
@@ -65,79 +50,55 @@ export function TradingView() {
     };
   }, []);
 
-  useEffect(() => { latestRef.current = incomingItems; }, [incomingItems]);
+  useEffect(() => { 
+    latestRef.current = opportunities; 
+  }, [opportunities]);
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      const latest = latestRef.current || [];
-      const mergedMap = { ...persistedMap };
-      for (const o of latest) {
-        const key = `${o.symbol}-${o.buyExchange}-${o.sellExchange}`;
-        const prev = mergedMap[key];
-        if (!prev || (o.netProfitPct ?? 0) > (prev.netProfitPct ?? 0)) {
-          mergedMap[key] = o;
-        } else if (!persistItems) {
-          mergedMap[key] = o;
-        }
-      }
-      const merged = Object.values(mergedMap);
-      setPersistedMap(mergedMap);
-      setItems(persistItems ? merged : latest);
-      setLoading(false);
-    }, refreshMs);
-    return () => clearInterval(id);
-  }, [refreshMs, persistItems, persistedMap]);
-
-  const filtered = useMemo(() => {
-    return (items || []).filter((item) => {
-      const net = item?.netProfitPct ?? 0;
-      const spread = item?.spreadPct ?? 0;
-      const vol = item?.volume24h ?? 0;
-      const qty = item?.quantity ?? 0;
-      const buyEff = item?.buyEffective ?? item?.buyPrice ?? 1;
-      const slipAbs = (item?.slippage?.buyAbs ?? 0) + (item?.slippage?.sellAbs ?? 0);
-      const slipPct = buyEff ? (slipAbs / buyEff) * 100 : 0;
-      const buyLiq = item?.buyLiquidity ?? item?.liquidity ?? 0;
-      const sellLiq = item?.sellLiquidity ?? item?.liquidity ?? 0;
-      return net >= minNetPct && net <= maxNetPct && spread <= 20 && vol > 0 && buyLiq >= qty * 2 && sellLiq >= qty * 2 && slipPct <= 0.2;
-    });
-  }, [items, minNetPct, maxNetPct]);
-
-  const sorted = useMemo(() => {
-    const key = sortKey;
-    const dir = sortDir === 'asc' ? 1 : -1;
-    return [...filtered].sort((a, b) => {
-      const va = a?.[key] ?? 0;
-      const vb = b?.[key] ?? 0;
-      if (va < vb) return -1 * dir;
-      if (va > vb) return 1 * dir;
-      return 0;
-    });
-  }, [filtered, sortKey, sortDir]);
-
-  function toggleSort(key) {
-    if (sortKey === key) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortKey(key);
-      setSortDir('desc');
+  // Helper to determine reasons an item is hidden
+  function getHiddenReasons(item, threshold) {
+    const reasons = [];
+    if (!item) return ['No item'];
+    const net = Number(item?.netProfitPct ?? 0);
+    if (Number.isFinite(net) && net < threshold) {
+      reasons.push(`Net profit ${net.toFixed(2)}% below threshold ${threshold}%`);
     }
+    if (item?.available === false) {
+      const dep = item?.buyTransfer?.depositEnabled;
+      const wdr = item?.sellTransfer?.withdrawEnabled;
+      if (dep === false) reasons.push('Deposit disabled on buy exchange');
+      if (wdr === false) reasons.push('Withdrawal disabled on sell exchange');
+      reasons.push('Transferability unavailable');
+    }
+    if (item?.isTradable === false) reasons.push('Not tradable on spot');
+    if (item?.marketActive === false) reasons.push('Market inactive or under maintenance');
+    if (!item?.buyPrice || !item?.sellPrice) reasons.push('Missing price data');
+    const buyLiq = Number(item?.buyLiquidity ?? 0);
+    const sellLiq = Number(item?.sellLiquidity ?? 0);
+    if (buyLiq < 1_000_000 || sellLiq < 1_000_000) reasons.push('Insufficient liquidity (< $1M)');
+    const vol = Number(item?.volume24h ?? 0);
+    if (vol < 1_000_000) reasons.push('Low 24h volume (< $1M)');
+    return reasons;
   }
+
+  // Derive displayed and hidden lists with reasons and sort by net profit
+  const displayed = (opportunities || [])
+    .filter((item) => getHiddenReasons(item, netProfitThreshold).length === 0)
+    .sort((a, b) => Number(b?.netProfitPct ?? 0) - Number(a?.netProfitPct ?? 0));
+  
+  const hidden = (opportunities || [])
+    .map((item) => ({ item, reasons: getHiddenReasons(item, netProfitThreshold) }))
+    .filter((x) => x.reasons.length > 0);
 
   if (loading) {
     return (
       <div className="space-y-6 animate-fade-in">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {[...Array(6)].map((_, i) => (
-            <Card key={i} className="bg-card border-border">
-              <CardHeader>
-                <Skeleton className="h-4 w-24 bg-muted" />
-              </CardHeader>
-              <CardContent>
-                <Skeleton className="h-8 w-32 bg-muted mb-2" />
-                <Skeleton className="h-4 w-48 bg-muted" />
-              </CardContent>
-            </Card>
+            <div key={i} className="bg-card border border-border rounded-md p-4">
+              <Skeleton className="h-4 w-24 bg-muted mb-3" />
+              <Skeleton className="h-8 w-32 bg-muted mb-2" />
+              <Skeleton className="h-4 w-48 bg-muted" />
+            </div>
           ))}
         </div>
       </div>
@@ -155,81 +116,67 @@ export function TradingView() {
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
+    <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-foreground">Trading View</h2>
+        <h2 className="text-2xl font-bold text-foreground">Live Trading Opportunities</h2>
         <div className="flex items-center gap-4">
-          <label className="text-sm text-muted-foreground flex items-center gap-2">
-            Refresh:
-            <select
-              className="bg-background border border-border rounded px-2 py-1 text-foreground"
-              value={refreshMs}
-              onChange={(e) => setRefreshMs(Number(e.target.value))}
-            >
-              <option value={10000}>10s</option>
-              <option value={30000}>30s</option>
-              <option value={60000}>1 min</option>
-              <option value={120000}>2 min</option>
-              <option value={300000}>5 min</option>
-            </select>
-          </label>
-          <label className="text-sm text-muted-foreground flex items-center gap-2">
-            Min Net %:
-            <input
-              type="number"
-              className="bg-background border border-border rounded px-2 py-1 w-20 text-foreground"
-              value={minNetPct}
-              onChange={(e) => setMinNetPct(Number(e.target.value))}
-              min={0}
-              step={0.1}
-            />
-          </label>
-          <label className="text-sm text-muted-foreground flex items-center gap-2">
-            Max Net %:
-            <input
-              type="number"
-              className="bg-background border border-border rounded px-2 py-1 w-20 text-foreground"
-              value={maxNetPct}
-              onChange={(e) => setMaxNetPct(Number(e.target.value))}
-              min={1}
-              step={0.1}
-            />
-          </label>
-          <label className="text-sm text-muted-foreground flex items-center gap-2">
-            Persist items
-            <input
-              type="checkbox"
-              checked={persistItems}
-              onChange={(e) => setPersistItems(e.target.checked)}
-            />
-          </label>
-          <div className="text-sm text-muted-foreground">{sorted.length} items</div>
+          <div className="text-sm text-muted-foreground">
+            {displayed.length} items ≥ {netProfitThreshold}% net
+          </div>
         </div>
       </div>
+      
+      {lastUpdated && (
+        <div className="text-xs text-muted-foreground">Last update: {new Date(lastUpdated).toLocaleTimeString()}</div>
+      )}
 
-      {sorted.length === 0 ? (
+      {/* Net profit threshold control */}
+      <div className="flex items-center gap-4 p-4 bg-muted/50 rounded-lg">
+        <label className="font-medium text-foreground">Net profit threshold (%)</label>
+        <input
+          type="range"
+          min={0}
+          max={10}
+          step={0.1}
+          value={netProfitThreshold}
+          onChange={(e) => setNetProfitThreshold(Number(e.target.value))}
+          className="w-48"
+        />
+        <input
+          type="number"
+          min={0}
+          max={100}
+          step={0.1}
+          value={netProfitThreshold}
+          onChange={(e) => setNetProfitThreshold(Number(e.target.value))}
+          className="w-20 px-2 py-1 border border-border rounded"
+        />
+        <span className="text-sm text-muted-foreground">(Default 1.5%)</span>
+      </div>
+
+      {displayed.length === 0 ? (
         <div className="text-center py-12">
-          <p className="text-muted-foreground">No tradable opportunities yet. Adjust net % thresholds or enable persistence.</p>
+          <p className="text-muted-foreground">No opportunities with ≥ {netProfitThreshold}% net profit currently available.</p>
         </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left text-muted-foreground">
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('symbol')}>Asset Pair</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyExchange')}>Buy Exchange</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('buyPrice')}>Buy Price</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellExchange')}>Sell Exchange</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('sellPrice')}>Sell Price</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('spreadPct')}>Spread %</th>
-                <th className="px-3 py-2 cursor-pointer" onClick={() => toggleSort('netProfitPct')}>Net Profit %</th>
+                <th className="px-3 py-2">Asset Pair</th>
+                <th className="px-3 py-2">Buy Exchange</th>
+                <th className="px-3 py-2">Buy Price</th>
+                <th className="px-3 py-2">Sell Exchange</th>
+                <th className="px-3 py-2">Sell Price</th>
+                <th className="px-3 py-2">Spread %</th>
+                <th className="px-3 py-2">Net Profit %</th>
                 <th className="px-3 py-2">Volume 24h</th>
                 <th className="px-3 py-2">Liquidity (buy/sell)</th>
                 <th className="px-3 py-2">Fees (trade/network)</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((item, idx) => (
+              {displayed.map((item, idx) => (
                 <tr key={idx} className="border-t border-border hover:bg-accent/50">
                   <td className="px-3 py-2 text-foreground">{item.symbol}</td>
                   <td className="px-3 py-2 text-foreground">{item.buyExchange}</td>
@@ -239,14 +186,44 @@ export function TradingView() {
                   <td className="px-3 py-2 text-foreground">{item.spreadPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-foreground">{item.netProfitPct?.toFixed(2)}%</td>
                   <td className="px-3 py-2 text-muted-foreground">{(item.volume24h ?? 0).toLocaleString()}</td>
-                  <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toFixed(4)} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toFixed(4)}</td>
-                  <td className="px-3 py-2 text-muted-foreground">{item.fees?.tradingAbs?.toFixed(6)} / {item.fees?.networkAbs?.toFixed(6)}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{(item.buyLiquidity ?? item.liquidity ?? 0)?.toLocaleString()} / {(item.sellLiquidity ?? item.liquidity ?? 0)?.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{item.fees?.tradingAbs?.toFixed(6) ?? '-'} / {item.fees?.networkAbs?.toFixed(6) ?? '-'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      {/* Hidden reasons inspector */}
+      <details className="mt-4">
+        <summary className="cursor-pointer font-medium text-foreground">
+          Filtered out opportunities: {hidden.length}
+        </summary>
+        <div className="mt-2">
+          {hidden.length === 0 ? (
+            <div className="text-green-600">None hidden. All visible meet your criteria.</div>
+          ) : (
+            <ul className="list-disc pl-5">
+              {hidden.map(({ item, reasons }, idx) => (
+                <li key={idx} className="mb-2">
+                  <div className="font-semibold">
+                    {item?.symbol} | {item?.buyExchange} → {item?.sellExchange}
+                  </div>
+                  <div className="text-muted-foreground">
+                    {reasons.map((r, i) => (
+                      <span key={i}>
+                        {r}
+                        {i < reasons.length - 1 ? '; ' : ''}
+                      </span>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </details>
     </div>
   );
 }

@@ -8,7 +8,9 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
     throw new Error('Missing GITHUB_GPT5_API_KEY');
   }
   const endpoint = process.env.GITHUB_ENDPOINT || 'https://models.github.ai/inference';
-  const model = process.env.GITHUB_MODEL || 'openai/gpt-5-nano';
+  const initialModel = process.env.GITHUB_MODEL || 'openai/gpt-5-nano';
+  const fallbackEnv = process.env.GITHUB_MODEL_FALLBACKS || 'openai/gpt-4o-mini,openai/gpt-4o';
+  const fallbackModels = fallbackEnv.split(',').map((s) => s.trim()).filter(Boolean);
 
   const client = ModelClient(endpoint, new AzureKeyCredential(token));
 
@@ -18,9 +20,17 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
   // Trim context to stay well under token limits
   const maxOpps = Number(process.env.AI_MAX_OPPS ?? 20);
   const maxSymbols = Number(process.env.AI_MAX_SYMBOLS ?? 30);
+  const minVol = Number(process.env.AI_MIN_VOLUME ?? 1_000_000);
+  const minLiq = Number(process.env.AI_MIN_LIQUIDITY ?? 1_000_000);
 
   function slimOpportunities(items = []) {
-    const sorted = [...items].sort((a, b) => (b?.netProfitPct ?? 0) - (a?.netProfitPct ?? 0));
+    const eligible = items.filter((o) => {
+      const vol = o?.volume24h ?? 0;
+      const buyLiq = o?.buyLiquidity ?? o?.liquidity ?? 0;
+      const sellLiq = o?.sellLiquidity ?? o?.liquidity ?? 0;
+      return vol >= minVol && buyLiq >= minLiq && sellLiq >= minLiq;
+    });
+    const sorted = [...eligible].sort((a, b) => (b?.netProfitPct ?? 0) - (a?.netProfitPct ?? 0));
     return sorted.slice(0, maxOpps).map((o) => ({
       symbol: o.symbol,
       buyExchange: o.buyExchange,
@@ -29,6 +39,18 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
       netProfitPct: o.netProfitPct,
       netProfitAbs: o.netProfitAbs,
       volume24h: o.volume24h,
+      buyLiquidity: o.buyLiquidity ?? o.liquidity,
+      sellLiquidity: o.sellLiquidity ?? o.liquidity,
+      buyPrice: o.buyPrice,
+      sellPrice: o.sellPrice,
+      fees: {
+        tradingAbs: o?.fees?.tradingAbs,
+        networkAbs: o?.fees?.networkAbs,
+      },
+      slippage: {
+        buyAbs: o?.slippage?.buyAbs,
+        sellAbs: o?.slippage?.sellAbs,
+      },
       ts: o.ts,
     }));
   }
@@ -61,7 +83,7 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
     return trimmed;
   }
 
-  const systemPrompt = `You are Crypto Arbitrage AI Trader. Use provided trimmed market context to answer the user's question with precise, actionable arbitrage recommendations. Return a JSON response with keys: opportunities, profit_estimates, strategy, risks.`;
+  const systemPrompt = `You are Crypto Arbitrage AI Trader. Recommend only opportunities with >= $${minVol.toLocaleString()} 24h volume and >= $${minLiq.toLocaleString()} liquidity on both legs. Use provided trimmed market context to answer precisely with actionable arbitrage recommendations.`;
 
   const context = {
     timestamp: Date.now(),
@@ -69,25 +91,13 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
       opportunityCount: Array.isArray(opps?.items) ? opps.items.length : 0,
       snapshotSymbolCount: Object.keys(snapshot?.data || {}).length,
       snapshotTs: snapshot?.timestamp,
+      constraints: { minVolumeUSD: minVol, minLiquidityUSD: minLiq },
     },
     opportunities: slimOpportunities(Array.isArray(opps?.items) ? opps.items : []),
     snapshot: slimSnapshot(snapshot),
   };
 
-  const response = await client.path('/chat/completions').post({
-    body: {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-        { role: 'user', content: `MARKET_CONTEXT_JSON: ${JSON.stringify(context)}` },
-      ],
-      model,
-      temperature: options.temperature ?? 0.2,
-    },
-  });
-
-  if (isUnexpected(response)) {
-    const errBody = response?.body;
+  function extractErrorMessage(errBody) {
     let msg = 'Model error';
     if (errBody) {
       if (typeof errBody === 'string') {
@@ -106,7 +116,50 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
         }
       }
     }
-    throw new Error(msg);
+    return msg;
+  }
+
+  async function postWithModel(modelName) {
+    return client.path('/chat/completions').post({
+      body: {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+          { role: 'user', content: `MARKET_CONTEXT_JSON: ${JSON.stringify(context)}` },
+        ],
+        model: modelName,
+        temperature: options.temperature ?? 0.2,
+      },
+    });
+  }
+
+  const candidates = [initialModel, ...fallbackModels];
+  let response;
+  let usedModel = initialModel;
+  let lastErrMsg = null;
+
+  for (const m of candidates) {
+    try {
+      const r = await postWithModel(m);
+      if (isUnexpected(r)) {
+        const msg = extractErrorMessage(r?.body);
+        lastErrMsg = msg;
+        if ((msg || '').toLowerCase().includes('unavailable model')) {
+          continue;
+        }
+        throw new Error(msg);
+      }
+      response = r;
+      usedModel = m;
+      break;
+    } catch (err) {
+      lastErrMsg = err?.message || String(err);
+      continue;
+    }
+  }
+
+  if (!response) {
+    throw new Error(lastErrMsg || 'AI model request failed');
   }
 
   const content = response.body?.choices?.[0]?.message?.content ?? '';
@@ -117,7 +170,7 @@ export async function callAiWithMarketContext(userMessage = 'Analyze arbitrage o
     parsed = { raw: content };
   }
 
-  return { model, result: parsed };
+  return { model: usedModel, result: parsed };
 }
 
 export default { callAiWithMarketContext };

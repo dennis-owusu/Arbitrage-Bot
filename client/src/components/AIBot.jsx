@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -10,6 +12,9 @@ export function AIBot() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const MIN_VOL_USD = 1_000_000;
+  const MIN_LIQ_USD = 1_000_000;
 
   async function sendMessage(e) {
     e?.preventDefault();
@@ -39,66 +44,96 @@ export function AIBot() {
 
   function renderAIContent(content) {
     if (!content) return null;
+    // If string, render as Markdown
     if (typeof content === 'string') {
-      return <p className="text-sm text-foreground whitespace-pre-wrap">{content}</p>;
+      return (
+        <div className="prose prose-invert max-w-none text-base">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+      );
     }
-    const { opportunities = [], profit_estimates, strategy, risks, raw } = content;
+    const { opportunities = [], strategy, risks, raw } = content;
+
+    // Enforce display-only constraints for legitimacy
+    const filtered = Array.isArray(opportunities)
+      ? opportunities.filter((o) => {
+          const vol = o?.volume24h ?? 0;
+          const buyLiq = o?.buyLiquidity ?? o?.liquidity ?? 0;
+          const sellLiq = o?.sellLiquidity ?? o?.liquidity ?? 0;
+          return vol >= MIN_VOL_USD && buyLiq >= MIN_LIQ_USD && sellLiq >= MIN_LIQ_USD;
+        })
+      : [];
+
     return (
-      <div className="space-y-4">
-        {Array.isArray(opportunities) && opportunities.length > 0 && (
+      <div className="space-y-6">
+        {filtered.length > 0 ? (
           <div>
-            <h4 className="text-sm font-semibold mb-2 text-foreground">Recommended Opportunities</h4>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-base font-semibold text-foreground">AI-Recommended Opportunities</h4>
+              <div className="text-xs text-muted-foreground">Min Volume: ${MIN_VOL_USD.toLocaleString()} • Min Liquidity: ${MIN_LIQ_USD.toLocaleString()}</div>
+            </div>
             <div className="overflow-x-auto rounded border border-border">
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left text-muted-foreground">
                     <th className="px-3 py-2">Pair</th>
-                    <th className="px-3 py-2">Buy</th>
-                    <th className="px-3 py-2">Sell</th>
+                    <th className="px-3 py-2">Buy Ex</th>
+                    <th className="px-3 py-2">Buy Price</th>
+                    <th className="px-3 py-2">Sell Ex</th>
+                    <th className="px-3 py-2">Sell Price</th>
                     <th className="px-3 py-2">Spread %</th>
                     <th className="px-3 py-2">Net %</th>
+                    <th className="px-3 py-2">Volume 24h</th>
+                    <th className="px-3 py-2">Liquidity (buy/sell)</th>
+                    <th className="px-3 py-2">Fees (trade/network)</th>
+                    <th className="px-3 py-2">Slippage (buy/sell)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {opportunities.slice(0, 10).map((o, i) => (
-                    <tr key={i}>
+                  {filtered.slice(0, 20).map((o, i) => (
+                    <tr key={i} className="border-t border-border hover:bg-accent/50">
                       <td className="px-3 py-2 text-foreground">{o.symbol}</td>
                       <td className="px-3 py-2 text-foreground">{o.buyExchange}</td>
+                      <td className="px-3 py-2 text-foreground">{typeof o.buyPrice === 'number' ? o.buyPrice.toFixed(6) : '-'}</td>
                       <td className="px-3 py-2 text-foreground">{o.sellExchange}</td>
+                      <td className="px-3 py-2 text-foreground">{typeof o.sellPrice === 'number' ? o.sellPrice.toFixed(6) : '-'}</td>
                       <td className="px-3 py-2 text-foreground">{typeof o.spreadPct === 'number' ? `${o.spreadPct.toFixed(2)}%` : '-'}</td>
                       <td className="px-3 py-2 text-foreground">{typeof o.netProfitPct === 'number' ? `${o.netProfitPct.toFixed(2)}%` : '-'}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{(o.volume24h ?? 0).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{(o.buyLiquidity ?? o.liquidity ?? 0)?.toLocaleString()} / {(o.sellLiquidity ?? o.liquidity ?? 0)?.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{o.fees?.tradingAbs != null ? o.fees.tradingAbs.toFixed(6) : '-'} / {o.fees?.networkAbs != null ? o.fees.networkAbs.toFixed(6) : '-'}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{o.slippage?.buyAbs != null ? o.slippage.buyAbs.toFixed(6) : '-'} / {o.slippage?.sellAbs != null ? o.slippage.sellAbs.toFixed(6) : '-'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           </div>
-        )}
-
-        {profit_estimates && (
-          <div>
-            <h4 className="text-sm font-semibold mb-1 text-foreground">Profit Estimates</h4>
-            <pre className="text-xs bg-muted text-muted-foreground rounded p-3 overflow-x-auto">{JSON.stringify(profit_estimates, null, 2)}</pre>
-          </div>
+        ) : (
+          <div className="text-sm text-muted-foreground">No AI opportunities meet the volume/liquidity constraints yet.</div>
         )}
 
         {strategy && (
           <div>
-            <h4 className="text-sm font-semibold mb-1 text-foreground">Strategy</h4>
-            <p className="text-sm text-foreground whitespace-pre-wrap">{strategy}</p>
+            <h4 className="text-base font-semibold mb-1 text-foreground">Strategy</h4>
+            <div className="prose prose-invert max-w-none text-base">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{strategy}</ReactMarkdown>
+            </div>
           </div>
         )}
 
         {risks && (
           <div>
-            <h4 className="text-sm font-semibold mb-1 text-foreground">Risks</h4>
-            <p className="text-sm text-foreground whitespace-pre-wrap">{risks}</p>
+            <h4 className="text-base font-semibold mb-1 text-foreground">Risks</h4>
+            <div className="prose prose-invert max-w-none text-base">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{risks}</ReactMarkdown>
+            </div>
           </div>
         )}
 
         {raw && (
           <div>
-            <h4 className="text-sm font-semibold mb-1 text-foreground">Raw</h4>
+            <h4 className="text-sm font-semibold mb-1 text-foreground">Model Notes</h4>
             <p className="text-xs text-muted-foreground whitespace-pre-wrap">{raw}</p>
           </div>
         )}
@@ -110,14 +145,14 @@ export function AIBot() {
     <div className="space-y-6 animate-fade-in">
       <Card className="bg-card border-border">
         <CardHeader>
-          <CardTitle className="text-xl text-foreground">AI Arbitrage Assistant</CardTitle>
+          <CardTitle className="text-2xl text-foreground">AI Arbitrage Assistant</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={sendMessage} className="flex gap-2">
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Ask the AI about current arbitrage opportunities..."
+              placeholder="Ask the AI about high-confidence arbitrage opportunities..."
               className="flex-1"
             />
             <Button type="submit" disabled={loading}>{loading ? 'Thinking…' : 'Ask AI'}</Button>
@@ -148,7 +183,9 @@ export function AIBot() {
             </CardHeader>
             <CardContent>
               {m.role === 'ai' ? renderAIContent(m.content) : (
-                <p className="text-sm text-foreground whitespace-pre-wrap">{m.content}</p>
+                <div className="prose prose-invert max-w-none text-base">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                </div>
               )}
             </CardContent>
           </Card>

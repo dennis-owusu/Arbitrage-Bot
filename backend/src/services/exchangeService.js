@@ -40,6 +40,17 @@ async function safeCall(func, ...args) {
 // Debug flag and markets cache utilities
 const ARB_DEBUG = process.env.ARB_DEBUG === 'true';
 const marketsCache = {};
+// Add currencies cache to avoid expensive repeated calls
+const currenciesCache = {};
+async function loadCurrenciesCached(exchangeName) {
+  const ex = exchanges[exchangeName];
+  if (!ex) return null;
+  if (!currenciesCache[exchangeName]) {
+    const currencies = await safeCall(ex.fetchCurrencies.bind(ex));
+    currenciesCache[exchangeName] = currencies || {};
+  }
+  return currenciesCache[exchangeName];
+}
 async function loadMarketsCached(exchangeName) {
   const ex = exchanges[exchangeName];
   if (!ex) return null;
@@ -144,6 +155,21 @@ async function fetchTradingPairData(exchangeName, symbol) {
   if (!market.active) return { error: `Symbol ${symbol} is not active on ${exchangeName}` };
   if (!market.spot) return { error: `Symbol ${symbol} is not tradable (spot) on ${exchangeName}` };
 
+  const base = market.base;
+  const quote = market.quote;
+
+  // Load currencies (cached) for transferability flags
+  const currencies = await loadCurrenciesCached(exchangeName);
+  const baseCurrency = currencies ? currencies[base] : undefined;
+  const transferability = {
+    base: {
+      depositEnabled: baseCurrency?.deposit ?? null,
+      withdrawEnabled: baseCurrency?.withdraw ?? null,
+      active: baseCurrency?.active ?? null,
+      status: (baseCurrency?.status ?? baseCurrency?.info?.status ?? null),
+    },
+  };
+
   // Fetch ticker for market data
   const ticker = await safeCall(exchange.fetchTicker.bind(exchange), symbol);
   if (!ticker) return { error: 'Failed to fetch ticker' };
@@ -202,6 +228,12 @@ async function fetchTradingPairData(exchangeName, symbol) {
     fees,
     limits,
     precision,
+    // Additional fields for availability
+    base,
+    quote,
+    marketActive: market.active,
+    marketSpot: market.spot,
+    transferability,
   };
 }
 
@@ -260,6 +292,9 @@ let latestOpportunities = { timestamp: null, items: [] };
 export function getLatestOpportunities() {
   return latestOpportunities;
 }
+
+// Active opportunities cache: persist items until they are no longer valid
+let activeOppMap = {};
 
 // Helpers: estimate effective fill price and slippage
 function estimateFillPrice(levels, qty) {
@@ -340,7 +375,7 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
         if (notionalBuy < minTradeUSDT) { pairsBelowNotional++; continue; }
 
         // Fees
-        const takerBuy = buyData.fees?.taker ?? 0;
+        const takerBuy = buyData.fees?.taker ?? 0; 
         const takerSell = sellData.fees?.taker ?? 0;
         const tradingFeesAbs = (qtyEff * buyEffective * takerBuy) + (qtyEff * sellEffective * takerSell);
 
@@ -403,7 +438,7 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
           estimates: {
             confidenceScore: (() => {
               const slip = (buyFill.slippageAbs || 0) + (sellFill.slippageAbs || 0);
-              const slipScore = Math.max(0, 1 - Math.min(slip / buyEffective, 0.02)); // cap at 2%
+              const slipScore = Math.max(0, 1 - Math.min(slip / buyEffective, 0.02));
               const liqScore = Math.min(1, availableLiquidity / (qtyEff * 10));
               const feeScore = Math.max(0, 1 - Math.min(tradingFeesAbs / grossProfitAbs, 0.9));
               return Number((0.5 * slipScore + 0.3 * liqScore + 0.2 * feeScore).toFixed(3));
@@ -415,6 +450,18 @@ function computeOpportunitiesFromAllData(allData, tradeSizeUSDT = Number(process
             liquidityRisk: Number((qtyEff > availableLiquidity ? 1 : Math.max(0, 1 - availableLiquidity / (qtyEff * 5))).toFixed(3)),
             feeRisk: Number((tradingFeesAbs / Math.max(grossProfitAbs, 1e-9)).toFixed(6)),
           },
+          // New availability fields
+          buyTransfer: buyData.transferability?.base ?? null,
+          sellTransfer: sellData.transferability?.base ?? null,
+          marketActive: Boolean(buyData.marketActive && sellData.marketActive),
+          isTradable: Boolean(buyData.marketSpot && sellData.marketSpot),
+          available: (() => {
+            const dep = buyData.transferability?.base?.depositEnabled;
+            const wdr = sellData.transferability?.base?.withdrawEnabled;
+            if (dep === false || wdr === false) return false;
+            if (!buyData.marketActive || !sellData.marketActive) return false;
+            return true;
+          })(),
           ts: Date.now(),
         };
 
@@ -473,6 +520,11 @@ async function startMultiSymbolPolling(interval = Number(process.env.SCAN_INTERV
   const batchSize = Number(process.env.SCAN_BATCH_SIZE ?? 30);
   let scanIndex = 0;
 
+  // Compute a reasonable TTL so items persist through a full scan cycle
+  const cycleTTL = Number(
+    process.env.OPP_ACTIVE_TTL_MS ?? (interval * Math.ceil(allSymbols.length / batchSize) + interval)
+  );
+
   const poll = async () => {
     const start = scanIndex;
     const end = Math.min(scanIndex + batchSize, allSymbols.length);
@@ -504,13 +556,52 @@ async function startMultiSymbolPolling(interval = Number(process.env.SCAN_INTERV
       }
     }
     latestSnapshot = { timestamp: Date.now(), data: allData };
+
+    // Compute raw opportunities
     const opps = computeOpportunitiesFromAllData(allData, tradeSizeUSDT);
-    latestOpportunities = { timestamp: Date.now(), items: opps };
-    console.log(`[Arb] Batch ${start}-${end - 1}: computed ${opps.length} opportunities`);
-    io.emit('scanLog', `[Arb] Batch ${start}-${end - 1}: computed ${opps.length} opportunities`);
-    io.emit('opportunityUpdate', opps);
-    if (opps.length > 0) {
-      for (const o of opps.slice(0, 20)) {
+
+    // Backend filter: only keep opportunities within configured net profit range
+    const minNet = Number(process.env.MIN_NET_PCT ?? 3);
+    const maxNet = Number(process.env.MAX_NET_PCT ?? 10);
+    const filteredOpps = (opps || []).filter(o => {
+      const net = o?.netProfitPct ?? 0;
+      return net >= minNet && net <= maxNet;
+    });
+
+    const now = Date.now();
+    // Update active cache: persist best per (symbol, buy, sell) until invalid/expired
+    for (const o of filteredOpps) {
+      const key = `${o.symbol}-${o.buyExchange}-${o.sellExchange}`;
+      const prev = activeOppMap[key];
+      if (!prev || (o.netProfitPct ?? 0) >= (prev.value?.netProfitPct ?? 0)) {
+        activeOppMap[key] = { value: o, lastSeenTs: now };
+      } else {
+        // Update to latest value but keep the cache entry alive
+        activeOppMap[key] = { value: o, lastSeenTs: now };
+      }
+    }
+
+    // Prune expired entries that haven't been seen in a full cycle
+    for (const [key, entry] of Object.entries(activeOppMap)) {
+      if (now - (entry.lastSeenTs ?? 0) > cycleTTL) {
+        delete activeOppMap[key];
+      }
+    }
+
+    // Build active list and update latest snapshot
+    const activeItems = Object.values(activeOppMap)
+      .map(e => e.value)
+      .sort((a, b) => (b.netProfitPct ?? 0) - (a.netProfitPct ?? 0));
+
+    latestOpportunities = { timestamp: now, items: activeItems };
+    console.log(`[Arb] Batch ${start}-${end - 1}: raw=${opps.length} filtered=${filteredOpps.length} active=${activeItems.length}`);
+    io.emit('scanLog', `[Arb] Batch ${start}-${end - 1}: raw=${opps.length} filtered=${filteredOpps.length} active=${activeItems.length}`);
+
+    // Emit persisted, filtered opportunities to frontend
+    io.emit('opportunityUpdate', activeItems);
+
+    if (activeItems.length > 0) {
+      for (const o of activeItems.slice(0, 20)) {
         console.log(`[Arb] ${o.symbol} ${o.buyExchange} -> ${o.sellExchange} | spread=${o.spreadPct?.toFixed(3)}% net=${o.netProfitPct?.toFixed(3)}% qty=${o.quantity?.toFixed(6)}`);
         io.emit('scanLog', `[Arb] ${o.symbol} ${o.buyExchange} -> ${o.sellExchange} | spread=${o.spreadPct?.toFixed(3)}% net=${o.netProfitPct?.toFixed(3)}% qty=${o.quantity?.toFixed(6)}`);
       }
