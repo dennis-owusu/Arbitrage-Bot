@@ -14,6 +14,45 @@ import { callAiWithMarketContext } from './src/services/aiService.js';
 // Load environment variables
 dotenv.config();
 
+// Validate required environment variables early
+const requiredEnv = ['MONGO_URI'];
+const missingRequired = requiredEnv.filter((k) => !process.env[k] || String(process.env[k]).trim() === '');
+if (missingRequired.length) {
+  console.error(`Missing required environment variables: ${missingRequired.join(', ')}`);
+  console.error('Set these in your Render service Environment tab or a local .env file before starting.');
+  process.exit(1);
+}
+
+// Provide visibility into optional environment variables used by the app
+const optionalEnv = [
+  // Service/runtime
+  'PORT',
+  // AI model server (GitHub Models via Azure REST)
+  'GITHUB_GPT5_API_KEY',
+  'GITHUB_ENDPOINT',
+  'GITHUB_MODEL',
+  'GITHUB_MODEL_FALLBACKS',
+  // Arbitrage scanning & ranking
+  'ARB_DEBUG',
+  'TRADE_SIZE_USDT',
+  'MIN_RAW_SPREAD_PCT',
+  'MIN_TRADE_USDT',
+  'SCAN_INTERVAL_MS',
+  'SCAN_EXCHANGES',
+  'SCAN_BATCH_SIZE',
+  'OPP_ACTIVE_TTL_MS',
+  'MIN_NET_PCT',
+  'MAX_NET_PCT',
+  // Exchange API credentials (optional for alerts; required for auto-trading)
+  'BINANCE_API_KEY', 'BINANCE_SECRET_KEY',
+  'KUCOIN_API_KEY', 'KUCOIN_SECRET_KEY', 'KUCOIN_PASSPHRASE',
+  'GATEIO_API_KEY', 'GATEIO_SECRET_KEY',
+  'BITGET_API_KEY', 'BITGET_SECRET_KEY',
+  'MEXC_API_KEY', 'MEXC_SECRET_KEY',
+  'BYBIT_API_KEY', 'BYBIT_SECRET_KEY',
+];
+console.log('Optional environment variables (configure as needed):', optionalEnv.join(', '));
+
 // Connect to database
 connectDB();
 
